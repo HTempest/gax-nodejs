@@ -1,0 +1,338 @@
+"use strict";
+/**
+ * Copyright 2020 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const chai_1 = require("chai");
+const path = require("path");
+const proxyquire = require("proxyquire");
+const sinon = require("sinon");
+const index_1 = require("../../src/index");
+const grpc_1 = require("../../src/grpc");
+function gaxGrpc(options) {
+    return new grpc_1.GrpcClient(options);
+}
+describe('grpc', () => {
+    describe('grpcVersion', () => {
+        it('holds the proper grpc version', () => {
+            const grpcModule = '@grpc/grpc-js';
+            const grpcVersion = require(`${grpcModule}/package.json`).version;
+            chai_1.expect(gaxGrpc().grpcVersion).to.eq(grpcVersion);
+        });
+        it('returns unknown when grpc module is mocked', () => {
+            const mockGrpc = {};
+            chai_1.expect(gaxGrpc({ grpc: mockGrpc }).grpcVersion).to.eq('');
+        });
+    });
+    describe('metadataBuilder', () => {
+        const grpcClient = gaxGrpc();
+        it('builds metadata', () => {
+            const headers = {
+                'X-Dummy-Header': 'Dummy value',
+                'Other-Header': 'Other value',
+                'X-Goog-Api-Client': 'gl-node/6.6.0 gccl/0.7.0 gax/0.11.0 grpc/1.1.0',
+            };
+            const builder = grpcClient.metadataBuilder(headers);
+            const metadata = builder();
+            // tslint:disable-next-line forin
+            for (const key in headers) {
+                chai_1.expect(metadata.get(key)).to.deep.eq([headers[key]]);
+            }
+        });
+        it('adds user metadata', () => {
+            const headers = {
+                'X-Dummy-Header': 'Dummy value',
+                'Other-Header': 'Other value',
+                'X-Goog-Api-Client': 'gl-node/6.6.0 gccl/0.7.0 gax/0.11.0 grpc/1.1.0',
+            };
+            const builder = grpcClient.metadataBuilder(headers);
+            const abTesting = null;
+            const moreHeaders = { foo: 'bar' };
+            const metadata = builder(abTesting, moreHeaders);
+            chai_1.expect(metadata.get('foo')).to.deep.eq(['bar']);
+        });
+        it('does not override x-goog-api-client', () => {
+            const headers = {
+                'X-Dummy-Header': 'Dummy value',
+                'Other-Header': 'Other value',
+                'X-Goog-Api-Client': 'gl-node/6.6.0 gccl/0.7.0 gax/0.11.0 grpc/1.1.0',
+            };
+            const builder = grpcClient.metadataBuilder(headers);
+            const abTesting = null;
+            const moreHeaders = { 'x-GOOG-api-CLIENT': 'something else' };
+            const metadata = builder(abTesting, moreHeaders);
+            chai_1.expect(metadata.get('x-goog-api-client')).to.deep.eq([
+                'gl-node/6.6.0 gccl/0.7.0 gax/0.11.0 grpc/1.1.0',
+            ]);
+        });
+        it.skip('customize api-client header for A/B testing', () => {
+            const headers = {
+                'X-Goog-Api-Client': 'gl-node/nodeVersion gax/gaxVersion',
+            };
+            const builder = grpcClient.metadataBuilder(headers);
+            let metadata = builder({ retry: '1' });
+            chai_1.expect(metadata.get('X-Goog-Api-Client')).to.deep.eq([
+                'gl-node/nodeVersion gax/gaxVersion gl-abkey1/retry gl-abval1/1',
+            ]);
+            metadata = builder({ retry: '2' });
+            chai_1.expect(metadata.get('X-Goog-Api-Client')).to.deep.eq([
+                'gl-node/nodeVersion gax/gaxVersion gl-abkey1/retry gl-abval1/2',
+            ]);
+            metadata = builder();
+            chai_1.expect(metadata.get('X-Goog-Api-Client')).to.deep.eq([
+                'gl-node/nodeVersion gax/gaxVersion',
+            ]);
+        });
+    });
+    describe('createStub', () => {
+        const TEST_PATH = path.resolve(__dirname, '../../test');
+        class DummyStub {
+            constructor(address, creds, options) {
+                this.address = address;
+                this.creds = creds;
+                this.options = options;
+            }
+        }
+        let grpcClient;
+        const dummyChannelCreds = { channelCreds: 'dummyChannelCreds' };
+        const stubAuth = { getClient: sinon.stub() };
+        const stubGrpc = {
+            credentials: {
+                createSsl: sinon.stub(),
+                combineChannelCredentials: sinon.stub(),
+                createFromGoogleCredential: sinon.stub(),
+            },
+        };
+        beforeEach(() => {
+            const dummyAuth = { authData: 'dummyAuth' };
+            const dummySslCreds = { sslCreds: 'dummySslCreds' };
+            const dummyGrpcAuth = { grpcAuth: 'dummyGrpcAuth' };
+            stubAuth.getClient.reset();
+            stubGrpc.credentials.createSsl.reset();
+            stubGrpc.credentials.combineChannelCredentials.reset();
+            stubGrpc.credentials.createFromGoogleCredential.reset();
+            stubAuth.getClient.resolves(dummyAuth);
+            stubGrpc.credentials.createSsl.returns(dummySslCreds);
+            stubGrpc.credentials.createFromGoogleCredential
+                .withArgs(dummyAuth)
+                .returns(dummyGrpcAuth);
+            stubGrpc.credentials.combineChannelCredentials
+                .withArgs(dummySslCreds, dummyGrpcAuth)
+                .returns(dummyChannelCreds);
+            grpcClient = gaxGrpc({
+                auth: stubAuth,
+                grpc: stubGrpc,
+            });
+        });
+        it('creates a stub', () => {
+            const opts = { servicePath: 'foo.example.com', port: 443 };
+            // @ts-ignore
+            return grpcClient.createStub(DummyStub, opts).then(stub => {
+                chai_1.expect(stub).to.be.an.instanceOf(DummyStub);
+                chai_1.expect(stub.address).to.eq('foo.example.com:443');
+                chai_1.expect(stub.creds).to.deep.eq(dummyChannelCreds);
+                chai_1.expect(stub.options).to.deep.eq({});
+            });
+        });
+        it('supports optional parameters', () => {
+            const opts = {
+                servicePath: 'foo.example.com',
+                port: 443,
+                'grpc.max_send_message_length': 10 * 1024 * 1024,
+                'grpc.initial_reconnect_backoff_ms': 10000,
+                other_dummy_options: 'test',
+            };
+            // @ts-ignore
+            return grpcClient.createStub(DummyStub, opts).then(stub => {
+                chai_1.expect(stub).to.be.an.instanceOf(DummyStub);
+                chai_1.expect(stub.address).to.eq('foo.example.com:443');
+                chai_1.expect(stub.creds).to.deep.eq(dummyChannelCreds);
+                // tslint:disable-next-line no-any
+                chai_1.expect(stub.options).has.key([
+                    'max_send_message_length',
+                    'initial_reconnect_backoff_ms',
+                ]);
+                // tslint:disable-next-line no-any
+                chai_1.expect(stub.options).to.not.have.key([
+                    'servicePath',
+                    'port',
+                    'other_dummy_options',
+                ]);
+            });
+        });
+        it('uses the passed grpc channel', () => {
+            const customCreds = { channelCreds: 'custom' };
+            const opts = {
+                servicePath: 'foo.example.com',
+                port: 443,
+                sslCreds: customCreds,
+            };
+            // @ts-ignore
+            return grpcClient.createStub(DummyStub, opts).then(stub => {
+                chai_1.expect(stub).to.be.an.instanceOf(DummyStub);
+                chai_1.expect(stub.address).to.eq('foo.example.com:443');
+                chai_1.expect(stub.creds).to.deep.eq(customCreds);
+                chai_1.expect(stubAuth.getClient.callCount).to.eq(0);
+                const credentials = stubGrpc.credentials;
+                chai_1.expect(credentials.createSsl.callCount).to.eq(0);
+                chai_1.expect(credentials.combineChannelCredentials.callCount).to.eq(0);
+                chai_1.expect(credentials.createFromGoogleCredential.callCount).to.eq(0);
+            });
+        });
+    });
+    describe('loadProto', () => {
+        const grpcClient = gaxGrpc();
+        const TEST_FILE = path.join('google', 'example', 'library', 'v1', 'library.proto');
+        const TEST_PATH = path.resolve(__dirname, '../../test/fixtures');
+        it('should load the test file', () => {
+            // no-any disabled because if the accessed fields are non-existent, this
+            // test will fail anyway.
+            // tslint:disable-next-line:no-any
+            const protos = grpcClient.loadProto(TEST_PATH, TEST_FILE);
+            chai_1.expect(protos.google.example.library.v1.LibraryService).to.be.a('Function');
+        });
+        it('should load the test file using single parameter syntax', () => {
+            const fullPath = path.join(TEST_PATH, TEST_FILE);
+            // no-any disabled because if the accessed fields are non-existent, this
+            // test will fail anyway.
+            // tslint:disable-next-line:no-any
+            const protos = grpcClient.loadProto(fullPath);
+            chai_1.expect(protos.google.example.library.v1.LibraryService).to.be.a('Function');
+        });
+        it('should load a common proto', () => {
+            const nonExistentDir = path.join(__dirname, 'nonexistent', 'dir');
+            const iamService = path.join('google', 'iam', 'v1', 'iam_policy.proto');
+            // no-any disabled because if the accessed fields are non-existent, this
+            // test will fail anyway.
+            // tslint:disable-next-line:no-any
+            const protos = grpcClient.loadProto(nonExistentDir, iamService);
+            chai_1.expect(protos.google.iam.v1.IAMPolicy).to.be.a('Function');
+        });
+        it('should be able to load no files', () => {
+            const protos = grpcClient.loadProto('.', []);
+            chai_1.expect(protos).to.deep.equal({});
+        });
+        it('should load multiple files', () => {
+            const iamService = path.join('google', 'iam', 'v1', 'iam_policy.proto');
+            // no-any disabled because if the accessed fields are non-existent, this
+            // test will fail anyway.
+            const protos = grpcClient.loadProto(TEST_PATH, [
+                TEST_FILE,
+                iamService,
+            ]);
+            chai_1.expect(protos.google.example.library.v1.LibraryService).to.be.a('Function');
+            chai_1.expect(protos.google.iam.v1.IAMPolicy).to.be.a('Function');
+        });
+        it('should emit an error for not found proto', () => {
+            const nonExistentDir = path.join(__dirname, 'nonexistent', 'dir');
+            const nonExistentFile = 'nonexistent.proto';
+            chai_1.expect(grpcClient.loadProto.bind(null, nonExistentDir, nonExistentFile)).to.throw();
+        });
+    });
+    describe('GoogleProtoFilesRoot', () => {
+        const FIXTURES_DIR = path.join(path.resolve(__dirname, '../../test'), 'fixtures', 'google', 'example', 'library', 'v1');
+        const TEST_FILE = path.join(FIXTURES_DIR, 'library.proto');
+        const NON_EXISTENT_FILE = path.join(__dirname, 'does', 'not', 'exist.proto');
+        const MISSING_INCLUDE_FILE = path.join(FIXTURES_DIR, 'missing_include.proto');
+        describe('use with protobufjs load', () => {
+            it('should not be able to load test file using protobufjs directly', done => {
+                index_1.protobuf
+                    .load(TEST_FILE)
+                    .then(() => {
+                    done(Error('should not get here'));
+                })
+                    .catch(() => {
+                    done();
+                });
+            });
+            it('should load a test file', done => {
+                index_1.protobuf
+                    .load(TEST_FILE, new grpc_1.GoogleProtoFilesRoot())
+                    .then(root => {
+                    chai_1.expect(root).to.be.an.instanceOf(index_1.protobuf.Root);
+                    chai_1.expect(root.lookup('google.example.library.v1.LibraryService')).to.be.an.instanceOf(index_1.protobuf.Service);
+                    chai_1.expect(root.lookup('test.TestMessage')).to.be.an.instanceOf(index_1.protobuf.Type);
+                    done();
+                })
+                    .catch(done);
+            });
+            it('should fail trying to load a non existent file.', done => {
+                index_1.protobuf
+                    .load(NON_EXISTENT_FILE, new grpc_1.GoogleProtoFilesRoot())
+                    .then(() => {
+                    done(Error('should not get here'));
+                })
+                    .catch(() => {
+                    done();
+                });
+            });
+            it('should fail loading a file with a missing include.', done => {
+                index_1.protobuf
+                    .load(MISSING_INCLUDE_FILE, new grpc_1.GoogleProtoFilesRoot())
+                    .then(() => {
+                    done(Error('should not get here'));
+                })
+                    .catch(() => {
+                    done();
+                });
+            });
+        });
+        describe('use with protobufjs loadSync', () => {
+            it('should not be able to load test file using protobufjs directly', () => {
+                const root = index_1.protobuf.loadSync(TEST_FILE);
+                // Common proto that should not have been loaded.
+                chai_1.expect(root.lookup('google.api.Http')).to.eq(null);
+            });
+            it('should load a test file that relies on common protos', () => {
+                const root = index_1.protobuf.loadSync(TEST_FILE, new grpc_1.GoogleProtoFilesRoot());
+                chai_1.expect(root).to.be.an.instanceOf(index_1.protobuf.Root);
+                chai_1.expect(root.lookup('google.example.library.v1.LibraryService')).to.be.an.instanceOf(index_1.protobuf.Service);
+                chai_1.expect(root.lookup('test.TestMessage')).to.be.an.instanceOf(index_1.protobuf.Type);
+            });
+            it('should fail trying to load a non existent file.', () => {
+                chai_1.expect(index_1.protobuf.loadSync.bind(null, NON_EXISTENT_FILE, new grpc_1.GoogleProtoFilesRoot())).to.throw();
+            });
+            it('should fail loading a file with a missing include', () => {
+                chai_1.expect(index_1.protobuf.loadSync.bind(null, MISSING_INCLUDE_FILE, new grpc_1.GoogleProtoFilesRoot())).to.throw();
+            });
+        });
+        describe('_findIncludePath', () => {
+            const originPath = path.join('test', 'path', 'location');
+            const includePath = path.join('example', 'import.proto');
+            it('should throw an error if a file is not found', () => {
+                const findIncludePath = proxyquire('../../src/grpc', {
+                    fs: {
+                        existsSync: () => {
+                            return false;
+                        },
+                    },
+                }).GoogleProtoFilesRoot._findIncludePath;
+                chai_1.expect(findIncludePath.bind(null, originPath, includePath)).to.throw();
+            });
+            it('should return the correct resolved import path', () => {
+                const correctPath = path.join('test', 'example', 'import.proto');
+                const findIncludePath = proxyquire('../../src/grpc', {
+                    fs: {
+                        existsSync(path) {
+                            return path === correctPath;
+                        },
+                    },
+                }).GoogleProtoFilesRoot._findIncludePath;
+                chai_1.expect(findIncludePath(originPath, includePath)).to.equal(correctPath);
+            });
+        });
+    });
+});
+//# sourceMappingURL=grpc.js.map
